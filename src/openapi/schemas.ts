@@ -472,6 +472,22 @@ export const transferQuerySchema = z.object({
   includeTotal: optionalQueryBool("Also return an exact `total`. Runs a COUNT over every matching row, so it is markedly slower on large result sets; omit it and use `hasMore` / `nextCursor` to paginate"),
 }).passthrough();
 
+export const exportQuerySchema = z.object({
+  ...withNetwork,
+  address: optionalQueryString("Filter by sender or recipient address"),
+  contractId: optionalQueryString("Token contract ID to filter by"),
+  fromLedger: optionalQueryInt({ min: 0 }),
+  toLedger: optionalQueryInt({ min: 0 }),
+  fromDate: optionalQueryDateTime("Inclusive lower bound on ledgerClosedAt"),
+  toDate: optionalQueryDateTime("Inclusive upper bound on ledgerClosedAt"),
+  eventType: eventTypeQuerySchema.openapi({ description: "Comma-separated list of event types" }),
+  maxRows: optionalQueryInt({
+    min: 1,
+    max: 500_000,
+    description: "Maximum number of rows to return. Defaults to 50,000. Requests exceeding this cap are capped at the maximum.",
+  }),
+}).passthrough();
+
 export const summaryQuerySchema = z.object({
   ...withNetwork,
   address: stellarAddressSchema,
@@ -567,3 +583,4 @@ export type TransferQuery = z.infer<typeof transferQuerySchema>;
 export type SummaryQuery = z.infer<typeof summaryQuerySchema>;
 export type HostFnQuery = z.infer<typeof hostFnQuerySchema>;
 export type NftTransfersQuery = z.infer<typeof nftTransfersQuerySchema>;
+export type ExportQuery = z.infer<typeof exportQuerySchema>;

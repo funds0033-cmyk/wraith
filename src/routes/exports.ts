@@ -1,12 +1,12 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { format as csvFormat } from "@fast-csv/format";
 import { prisma, toDisplayAmount } from "../db";
-import os from "os";
-import path from "path";
-import fs from "fs";
-import { z } from "zod";
+import { tmpdir } from "os";
+import * as path from "path";
+import * as fs from "fs";
 import { requestNetwork } from "../middleware/network";
 import { parseOr400 } from "../openapi/validation";
+import { exportQuerySchema, type ExportQuery } from "../openapi/schemas";
 import type { Network } from "../network";
 import { getCachedTokenDecimals } from "../tokenCache";
 
@@ -17,28 +17,11 @@ const BATCH_SIZE = 500;
 // paginate with fromLedger/toLedger or apply a tighter date/address filter.
 // The value is deliberately large enough to be useful but small enough to keep
 // memory and response time predictable under load.
-const DEFAULT_MAX_ROWS = 50_000;
 const ABSOLUTE_MAX_ROWS = 500_000;
-
-// ── Query-param schema ────────────────────────────────────────────────────────
-// Exported so the OpenAPI build can reference it.
-export const exportQuerySchema = z.object({
-  address:    z.string().trim().optional(),
-  contractId: z.string().trim().optional(),
-  fromLedger: z.coerce.number().int().min(0).optional(),
-  toLedger:   z.coerce.number().int().min(0).optional(),
-  fromDate:   z.string().datetime({ offset: true, message: "Invalid date — expected ISO 8601 (e.g. 2025-01-01T00:00:00Z)" })
-                .transform((v) => new Date(v)).optional(),
-  toDate:     z.string().datetime({ offset: true, message: "Invalid date — expected ISO 8601 (e.g. 2025-01-01T00:00:00Z)" })
-                .transform((v) => new Date(v)).optional(),
-  eventType:  z.string().trim().optional(),
-  maxRows:    z.coerce.number().int()
-                .min(1, "maxRows must be >= 1")
-                .max(ABSOLUTE_MAX_ROWS, `maxRows must be <= ${ABSOLUTE_MAX_ROWS}`)
-                .optional(),
-});
-
-type ExportQuery = z.infer<typeof exportQuerySchema>;
+const DEFAULT_MAX_ROWS = Math.min(
+  Number(process.env.EXPORT_MAX_ROWS) || 50_000,
+  ABSOLUTE_MAX_ROWS,
+);
 
 // ── Shared: build a Prisma where clause from validated params ─────────────────
 function buildWhere(params: ExportQuery, network: Network) {
@@ -53,7 +36,7 @@ function buildWhere(params: ExportQuery, network: Network) {
   }
   if (contractId) where.contractId = contractId;
   if (eventType) {
-    const types = eventType.split(",").map((s) => s.trim()).filter(Boolean);
+    const types = Array.isArray(eventType) ? eventType : eventType;
     if (types.length) where.eventType = { in: types };
   }
 
@@ -68,6 +51,16 @@ function buildWhere(params: ExportQuery, network: Network) {
   if (Object.keys(dateRange).length) where.ledgerClosedAt = dateRange;
 
   return where;
+}
+
+// ── Shared: check if results would be truncated ───────────────────────────────
+// Is there a row beyond the cap? Cheaper than a COUNT and, unlike fetching
+// one extra row mid-stream, the answer arrives while headers can still be set.
+async function isTruncated(where: Record<string, unknown>, max: number): Promise<boolean> {
+  const beyond = await prisma.tokenTransfer.findMany({
+    where, orderBy: { id: "asc" }, skip: max, take: 1, select: { id: true },
+  });
+  return beyond.length > 0;
 }
 
 // ── Shared: async generator that yields rows in batches via cursor ────────────
@@ -110,25 +103,19 @@ async function handleCsvExport(req: Request, res: Response, next: NextFunction) 
     const network = requestNetwork(req);
     const where = buildWhere(parsed, network);
 
-    // Fetch one row beyond the cap so we can tell the caller whether the result
-    // was truncated without a separate COUNT query.
-    let rowCount = 0;
-    let truncated = false;
+    const truncated = await isTruncated(where, effectiveMax);
 
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", "attachment; filename=\"transfers.csv\"");
-    res.setHeader("Transfer-Encoding", "chunked");
+    if (truncated) {
+      res.setHeader("X-Truncated", "true");
+      res.setHeader("X-Row-Limit", String(effectiveMax));
+    }
 
     const csvStream = csvFormat({ headers: true });
     csvStream.pipe(res);
 
-    for await (const row of streamTransfers(where, effectiveMax + 1)) {
-      if (rowCount === effectiveMax) {
-        // We fetched one extra row — result is truncated, don't write this row.
-        truncated = true;
-        break;
-      }
-
+    for await (const row of streamTransfers(where, effectiveMax)) {
       csvStream.write({
         id:             row.id,
         contractId:     row.contractId,
@@ -144,18 +131,6 @@ async function handleCsvExport(req: Request, res: Response, next: NextFunction) 
         isSac:          row.isSac ?? false,
         createdAt:      row.createdAt.toISOString(),
       });
-
-      rowCount++;
-    }
-
-    // Signal truncation in a trailer header. HTTP/1.1 trailing headers require
-    // chunked encoding (which we've already set) and the client to opt in; as a
-    // belt-and-suspenders fallback we also set it as a regular response header
-    // before the body starts — Express buffers headers until the first write so
-    // this arrives before any CSV bytes.
-    if (truncated) {
-      res.setHeader("X-Truncated", "true");
-      res.setHeader("X-Row-Limit", String(effectiveMax));
     }
 
     csvStream.end();
@@ -171,7 +146,7 @@ async function handleParquetExport(req: Request, res: Response, next: NextFuncti
   const parquet = require("parquetjs-lite");
 
   const tmpFile = path.join(
-    os.tmpdir(),
+    tmpdir(),
     `transfers-${Date.now()}-${Math.random().toString(36).slice(2)}.parquet`,
   );
 
@@ -201,15 +176,9 @@ async function handleParquetExport(req: Request, res: Response, next: NextFuncti
 
     const writer = await parquet.ParquetWriter.openFile(schema, tmpFile);
 
-    let rowCount = 0;
-    let truncated = false;
+    const truncated = await isTruncated(where, effectiveMax);
 
-    for await (const row of streamTransfers(where, effectiveMax + 1)) {
-      if (rowCount === effectiveMax) {
-        truncated = true;
-        break;
-      }
-
+    for await (const row of streamTransfers(where, effectiveMax)) {
       await writer.appendRow({
         id:             row.id,
         contractId:     row.contractId,
@@ -225,8 +194,6 @@ async function handleParquetExport(req: Request, res: Response, next: NextFuncti
         isSac:          row.isSac ?? null,
         createdAt:      row.createdAt.toISOString(),
       });
-
-      rowCount++;
     }
 
     await writer.close();

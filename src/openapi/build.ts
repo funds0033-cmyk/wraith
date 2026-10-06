@@ -1,10 +1,11 @@
 import { mkdirSync, writeFileSync } from "fs";
-import path from "path";
+import * as path from "path";
 import { OpenAPIRegistry, OpenApiGeneratorV3 } from "@asteasolutions/zod-to-openapi";
 import {
   addressPathSchema,
   booleanOkResponseSchema,
   errorResponseSchema,
+  exportQuerySchema,
   healthzResponseSchema,
   hostFnQuerySchema,
   hostFnLogsResponseSchema,
@@ -148,6 +149,68 @@ registry.registerPath({
       content: {
         "text/csv": {
           schema: { type: "string", format: "binary" },
+        },
+      },
+    },
+    ...commonErrorResponses,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/transfers.csv",
+  summary: "Export all transfers to CSV",
+  description: "CSV export of token transfers. Results are capped at maxRows (default 50,000, configurable via EXPORT_MAX_ROWS env var). When capped, the response includes X-Truncated and X-Row-Limit headers.",
+  request: {
+    query: exportQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "CSV export",
+      content: {
+        "text/csv": {
+          schema: { type: "string", format: "binary" },
+        },
+      },
+      headers: {
+        "X-Truncated": {
+          description: "Set to 'true' when the result set exceeds maxRows and was truncated",
+          schema: { type: "string" },
+        },
+        "X-Row-Limit": {
+          description: "The maxRows cap applied to this request",
+          schema: { type: "string" },
+        },
+      },
+    },
+    ...commonErrorResponses,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/transfers.parquet",
+  summary: "Export all transfers to Parquet",
+  description: "Parquet export of token transfers. Results are capped at maxRows (default 50,000, configurable via EXPORT_MAX_ROWS env var). When capped, the response includes X-Truncated and X-Row-Limit headers.",
+  request: {
+    query: exportQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Parquet export",
+      content: {
+        "application/octet-stream": {
+          schema: { type: "string", format: "binary" },
+        },
+      },
+      headers: {
+        "X-Truncated": {
+          description: "Set to 'true' when the result set exceeds maxRows and was truncated",
+          schema: { type: "string" },
+        },
+        "X-Row-Limit": {
+          description: "The maxRows cap applied to this request",
+          schema: { type: "string" },
         },
       },
     },

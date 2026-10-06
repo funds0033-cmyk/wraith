@@ -1769,6 +1769,396 @@
         }
       }
     },
+    "/transfers.csv": {
+      "get": {
+        "summary": "Export all transfers to CSV",
+        "description": "CSV export of token transfers. Results are capped at maxRows (default 50,000, configurable via EXPORT_MAX_ROWS env var). When capped, the response includes X-Truncated and X-Row-Limit headers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "enum": [
+                "testnet",
+                "mainnet",
+                null
+              ],
+              "description": "Network to read from. Defaults to the deployment's configured network. May also be sent as the X-Network header; the query parameter wins.",
+              "example": "mainnet"
+            },
+            "required": false,
+            "description": "Network to read from. Defaults to the deployment's configured network. May also be sent as the X-Network header; the query parameter wins.",
+            "name": "network",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by sender or recipient address"
+            },
+            "required": false,
+            "description": "Filter by sender or recipient address",
+            "name": "address",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Token contract ID to filter by"
+            },
+            "required": false,
+            "description": "Token contract ID to filter by",
+            "name": "contractId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true
+            },
+            "required": false,
+            "name": "fromLedger",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true
+            },
+            "required": false,
+            "name": "toLedger",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "format": "date-time",
+              "description": "Inclusive lower bound on ledgerClosedAt"
+            },
+            "required": false,
+            "description": "Inclusive lower bound on ledgerClosedAt",
+            "name": "fromDate",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "format": "date-time",
+              "description": "Inclusive upper bound on ledgerClosedAt"
+            },
+            "required": false,
+            "description": "Inclusive upper bound on ledgerClosedAt",
+            "name": "toDate",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "array",
+              "nullable": true,
+              "items": {
+                "type": "string"
+              },
+              "description": "Comma-separated list of event types"
+            },
+            "required": false,
+            "description": "Comma-separated list of event types",
+            "name": "eventType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "description": "Maximum number of rows to return. Defaults to 50,000. Requests exceeding this cap are capped at the maximum."
+            },
+            "required": false,
+            "description": "Maximum number of rows to return. Defaults to 50,000. Requests exceeding this cap are capped at the maximum.",
+            "name": "maxRows",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV export",
+            "headers": {
+              "X-Truncated": {
+                "description": "Set to 'true' when the result set exceeds maxRows and was truncated",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Row-Limit": {
+                "description": "The maxRows cap applied to this request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transfers.parquet": {
+      "get": {
+        "summary": "Export all transfers to Parquet",
+        "description": "Parquet export of token transfers. Results are capped at maxRows (default 50,000, configurable via EXPORT_MAX_ROWS env var). When capped, the response includes X-Truncated and X-Row-Limit headers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "enum": [
+                "testnet",
+                "mainnet",
+                null
+              ],
+              "description": "Network to read from. Defaults to the deployment's configured network. May also be sent as the X-Network header; the query parameter wins.",
+              "example": "mainnet"
+            },
+            "required": false,
+            "description": "Network to read from. Defaults to the deployment's configured network. May also be sent as the X-Network header; the query parameter wins.",
+            "name": "network",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by sender or recipient address"
+            },
+            "required": false,
+            "description": "Filter by sender or recipient address",
+            "name": "address",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Token contract ID to filter by"
+            },
+            "required": false,
+            "description": "Token contract ID to filter by",
+            "name": "contractId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true
+            },
+            "required": false,
+            "name": "fromLedger",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true
+            },
+            "required": false,
+            "name": "toLedger",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "format": "date-time",
+              "description": "Inclusive lower bound on ledgerClosedAt"
+            },
+            "required": false,
+            "description": "Inclusive lower bound on ledgerClosedAt",
+            "name": "fromDate",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "format": "date-time",
+              "description": "Inclusive upper bound on ledgerClosedAt"
+            },
+            "required": false,
+            "description": "Inclusive upper bound on ledgerClosedAt",
+            "name": "toDate",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "array",
+              "nullable": true,
+              "items": {
+                "type": "string"
+              },
+              "description": "Comma-separated list of event types"
+            },
+            "required": false,
+            "description": "Comma-separated list of event types",
+            "name": "eventType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "description": "Maximum number of rows to return. Defaults to 50,000. Requests exceeding this cap are capped at the maximum."
+            },
+            "required": false,
+            "description": "Maximum number of rows to return. Defaults to 50,000. Requests exceeding this cap are capped at the maximum.",
+            "name": "maxRows",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Parquet export",
+            "headers": {
+              "X-Truncated": {
+                "description": "Set to 'true' when the result set exceeds maxRows and was truncated",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Row-Limit": {
+                "description": "The maxRows cap applied to this request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/transfers/tx/{txHash}": {
       "get": {
         "summary": "Transfers by transaction",
