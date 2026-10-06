@@ -18,6 +18,15 @@ const BATCH_SIZE = 500;
 // The value is deliberately large enough to be useful but small enough to keep
 // memory and response time predictable under load.
 const ABSOLUTE_MAX_ROWS = 500_000;
+
+/**
+ * Default row cap, overridable per deployment with EXPORT_MAX_ROWS.
+ *
+ * Clamped to ABSOLUTE_MAX_ROWS rather than trusted: an env var is how an
+ * operator lowers this without a release, and a mistyped one must not be able
+ * to raise it past what the process can hold. A non-numeric value falls back
+ * rather than becoming NaN, which would make every comparison below false.
+ */
 const DEFAULT_MAX_ROWS = Math.min(
   Number(process.env.EXPORT_MAX_ROWS) || 50_000,
   ABSOLUTE_MAX_ROWS,
@@ -53,12 +62,27 @@ function buildWhere(params: ExportQuery, network: Network) {
   return where;
 }
 
-// ── Shared: check if results would be truncated ───────────────────────────────
-// Is there a row beyond the cap? Cheaper than a COUNT and, unlike fetching
-// one extra row mid-stream, the answer arrives while headers can still be set.
-async function isTruncated(where: Record<string, unknown>, max: number): Promise<boolean> {
+/**
+ * Is there a row beyond the cap?
+ *
+ * Asked before any bytes are written, because that is the only time the answer
+ * can still be put in a header. Detecting truncation mid-stream — by fetching
+ * one extra row and then calling res.setHeader — throws ERR_HTTP_HEADERS_SENT:
+ * the first csvStream.write has already flushed the response head. That throw
+ * skips csvStream.end(), so the client is left holding a CSV body that never
+ * terminates, and it happens only on the truncation path, which is the one case
+ * the signalling exists for.
+ *
+ * One indexed query against the same filter, and cheaper than a COUNT because
+ * it stops at the first row past the cap.
+ */
+async function hasRowsBeyond(where: Record<string, unknown>, max: number): Promise<boolean> {
   const beyond = await prisma.tokenTransfer.findMany({
-    where, orderBy: { id: "asc" }, skip: max, take: 1, select: { id: true },
+    where,
+    orderBy: { id: "asc" },
+    skip: max,
+    take: 1,
+    select: { id: true },
   });
   return beyond.length > 0;
 }
@@ -103,10 +127,12 @@ async function handleCsvExport(req: Request, res: Response, next: NextFunction) 
     const network = requestNetwork(req);
     const where = buildWhere(parsed, network);
 
-    const truncated = await isTruncated(where, effectiveMax);
+    // Before a single byte: once the body starts, headers can no longer be set.
+    const truncated = await hasRowsBeyond(where, effectiveMax);
 
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", "attachment; filename=\"transfers.csv\"");
+    res.setHeader("Transfer-Encoding", "chunked");
     if (truncated) {
       res.setHeader("X-Truncated", "true");
       res.setHeader("X-Row-Limit", String(effectiveMax));
@@ -176,7 +202,10 @@ async function handleParquetExport(req: Request, res: Response, next: NextFuncti
 
     const writer = await parquet.ParquetWriter.openFile(schema, tmpFile);
 
-    const truncated = await isTruncated(where, effectiveMax);
+    // Headers are set after the file is written here, so this could have been
+    // detected mid-stream — but it goes through the same helper as CSV so the
+    // two endpoints cannot answer differently about the same query.
+    const truncated = await hasRowsBeyond(where, effectiveMax);
 
     for await (const row of streamTransfers(where, effectiveMax)) {
       await writer.appendRow({

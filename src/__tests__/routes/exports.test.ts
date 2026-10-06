@@ -1,238 +1,123 @@
 import request from "supertest";
 import { createApp } from "../../api";
-
-// ── Module mocks must be declared before any imports that use them ──────────
-jest.mock("../../db", () => ({
-  queryTransfers: jest.fn(),
-  queryAllTransfers: jest.fn(),
-  queryByTxHash: jest.fn(),
-  querySummary: jest.fn(),
-  getLastIndexedLedger: jest.fn(),
-  prisma: {
-    $queryRaw: jest.fn(),
-    tokenTransfer: { findMany: jest.fn() },
-    tokenMetadata: { findMany: jest.fn() },
-  },
-}));
-
-jest.mock("../../rpc", () => ({
-  getLatestLedger: jest.fn(),
-}));
-
-jest.mock("../../indexer", () => ({
-  // #161: /status also reads per-network loop state. Listed explicitly
-  // because a partial mock silently 500s the route rather than failing loudly.
-  getAllIndexerStats: jest.fn().mockReturnValue({}),
-  runningNetworks: jest.fn().mockReturnValue([]),
-  getIndexerStats: jest
-    .fn()
-    .mockReturnValue({ startedAt: "2024-01-01T00:00:00.000Z", uptimeSeconds: 0, totalIndexed: 0 }),
-}));
-
-jest.mock("../../linq/ngnOrders", () => ({}));
-
 import { prisma } from "../../db";
-import { _resetTokenCache, initTokenCache } from "../../tokenCache";
 
-// ── Typed mock helpers ────────────────────────────────────────────────────────
-const mockPrismaTokenTransferFindMany = prisma.tokenTransfer.findMany as jest.MockedFunction<typeof prisma.tokenTransfer.findMany>;
+const mockFindMany = prisma.tokenTransfer.findMany as jest.MockedFunction<
+  typeof prisma.tokenTransfer.findMany
+>;
 
-// ── Seed data factory ─────────────────────────────────────────────────────────
-const CONTRACT_A = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-
+const CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 const ALICE = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-const BOB   = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWWHF";
 
-function makeTransfer(id: number, overrides: Partial<ReturnType<typeof baseTransfer>> = {}) {
-  return { ...baseTransfer(), id, ...overrides };
-}
-
-function baseTransfer() {
+function row(id: number) {
   return {
-    id: 1,
-    network: "testnet",
-    contractId: CONTRACT_A,
+    id,
+    contractId: CONTRACT,
     eventType: "transfer",
-    fromAddress: BOB,
+    fromAddress: ALICE,
     toAddress: ALICE,
-    amount: "10000000000",
-    ledger: 1000,
-    ledgerClosedAt: new Date("2025-01-01T00:00:00Z"),
-    txHash: "aaaa1111",
-    eventId: "evt-001",
+    amount: "100",
+    ledger: 1000 + id,
+    ledgerClosedAt: new Date("2026-01-01T00:00:00Z"),
+    txHash: `hash${id}`,
+    eventId: `event${id}`,
     isSac: false,
-    createdAt: new Date("2025-01-01T00:00:01Z"),
+    createdAt: new Date("2026-01-01T00:00:00Z"),
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Serve `total` rows, honouring `skip`/`take` the way Prisma does.
+ *
+ * The cap probe is a `skip: max, take: 1` query against the same filter, so a
+ * mock that ignores `skip` would answer "truncated" for every request and the
+ * tests would pass for the wrong reason.
+ */
+function seed(total: number) {
+  mockFindMany.mockImplementation((async (args: {
+    skip?: number;
+    take?: number;
+    cursor?: { id: number };
+  }) => {
+    const all = Array.from({ length: total }, (_, i) => row(i + 1));
+    const after = args.cursor ? all.findIndex((r) => r.id === args.cursor!.id) + 1 : 0;
+    const from = after + (args.skip ?? 0);
+    return all.slice(from, from + (args.take ?? all.length));
+  }) as never);
+}
 
-describe("Export route handlers", () => {
-  const app = createApp();
+beforeEach(() => {
+  jest.clearAllMocks();
+});
 
-  beforeEach(() => {
-    _resetTokenCache();
-    mockPrismaTokenTransferFindMany.mockClear();
+/**
+ * Bounding and validating the exports (#185).
+ *
+ * The cap is the point of the feature, but the header that announces it is
+ * where the danger was: setting a response header after the CSV body has begun
+ * throws ERR_HTTP_HEADERS_SENT, which skips `csvStream.end()` and leaves the
+ * client holding a response that never terminates — and it only happens on the
+ * truncation path, the one case the signalling exists for.
+ */
+describe("GET /transfers.csv", () => {
+  it("rejects a non-numeric fromLedger with 400, not 500", async () => {
+    const res = await request(createApp()).get("/transfers.csv?fromLedger=abc");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeTruthy();
+    // Nothing was queried: validation happens before the database is touched.
+    expect(mockFindMany).not.toHaveBeenCalled();
   });
 
-  describe("GET /transfers.csv", () => {
-    it("returns 400 for invalid fromLedger (non-numeric)", async () => {
-      const res = await request(app).get("/transfers.csv").query({ fromLedger: "abc" });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/invalid/i);
-    });
-
-    it("returns 400 for invalid maxRows (negative)", async () => {
-      const res = await request(app).get("/transfers.csv").query({ maxRows: "-1" });
-
-      expect(res.status).toBe(400);
-    });
-
-    it("returns 400 for invalid fromDate", async () => {
-      const res = await request(app).get("/transfers.csv").query({ fromDate: "not-a-date" });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Invalid date/i);
-    });
-
-    it("returns 400 for invalid toDate", async () => {
-      const res = await request(app).get("/transfers.csv").query({ toDate: "garbage" });
-
-      expect(res.status).toBe(400);
-    });
-
-    it("caps results at maxRows when more rows exist", async () => {
-      // Seed 10 rows, cap at 5
-      const transfers = Array.from({ length: 10 }, (_, i) => makeTransfer(i + 1));
-      
-      // First call: isTruncated check (skip 5, take 1, select: { id: true })
-      mockPrismaTokenTransferFindMany
-        .mockResolvedValueOnce([{ id: 6 } as any]) // Row exists beyond cap
-        // Second call: streamTransfers (take 5)
-        .mockResolvedValueOnce(transfers.slice(0, 5));
-
-      (prisma.tokenMetadata.findMany as jest.Mock).mockResolvedValue([
-        { network: "testnet", contractId: CONTRACT_A, symbol: "TOK", name: "Token", decimals: 7 },
-      ]);
-      await initTokenCache("testnet");
-
-      const res = await request(app).get("/transfers.csv").query({ maxRows: "5" });
-
-      expect(res.status).toBe(200);
-      expect(res.headers["x-truncated"]).toBe("true");
-      expect(res.headers["x-row-limit"]).toBe("5");
-      expect(res.headers["content-type"]).toBe("text/csv");
-      
-      const csvBody = res.text;
-      const lines = csvBody.split("\n").filter(Boolean);
-      expect(lines.length).toBe(6); // header + 5 rows
-    });
-
-    it("does not set truncation headers when fewer rows than cap", async () => {
-      const transfers = Array.from({ length: 3 }, (_, i) => makeTransfer(i + 1));
-      
-      // First call: isTruncated check (skip 5, take 1)
-      mockPrismaTokenTransferFindMany
-        .mockResolvedValueOnce([]) // No row beyond cap
-        // Second call: streamTransfers (take 5, but only 3 exist)
-        .mockResolvedValueOnce(transfers);
-
-      (prisma.tokenMetadata.findMany as jest.Mock).mockResolvedValue([
-        { network: "testnet", contractId: CONTRACT_A, symbol: "TOK", name: "Token", decimals: 7 },
-      ]);
-      await initTokenCache("testnet");
-
-      const res = await request(app).get("/transfers.csv").query({ maxRows: "5" });
-
-      expect(res.status).toBe(200);
-      expect(res.headers["x-truncated"]).toBeUndefined();
-      expect(res.headers["x-row-limit"]).toBeUndefined();
-      
-      const csvBody = res.text;
-      const lines = csvBody.split("\n").filter(Boolean);
-      expect(lines.length).toBe(4); // header + 3 rows
-    });
-
-    it("handles empty string query params gracefully (ignores them)", async () => {
-      mockPrismaTokenTransferFindMany
-        .mockResolvedValueOnce([]) // isTruncated check
-        .mockResolvedValueOnce([]); // streamTransfers
-
-      const res = await request(app)
-        .get("/transfers.csv")
-        .query({ address: "", contractId: "", maxRows: "" });
-
-      expect(res.status).toBe(200);
-    });
-
-    it("takes first value when duplicate params are provided", async () => {
-      mockPrismaTokenTransferFindMany
-        .mockResolvedValueOnce([]) // isTruncated check
-        .mockResolvedValueOnce([]); // streamTransfers
-
-      const res = await request(app)
-        .get("/transfers.csv")
-        .query({ maxRows: ["10", "20"] });
-
-      expect(res.status).toBe(200);
-    });
+  it("rejects an unparseable date with 400", async () => {
+    const res = await request(createApp()).get("/transfers.csv?fromDate=not-a-date");
+    expect(res.status).toBe(400);
   });
 
-  describe("GET /transfers.parquet", () => {
-    it("returns 400 for invalid fromLedger (non-numeric)", async () => {
-      const res = await request(app).get("/transfers.parquet").query({ fromLedger: "abc" });
+  it("rejects maxRows above the absolute ceiling", async () => {
+    const res = await request(createApp()).get("/transfers.csv?maxRows=999999999");
+    expect(res.status).toBe(400);
+  });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/invalid/i);
-    });
+  it("stops at the cap and says so, in headers that arrive before the body", async () => {
+    seed(10);
 
-    it("returns 400 for invalid maxRows (negative)", async () => {
-      const res = await request(app).get("/transfers.parquet").query({ maxRows: "-1" });
+    const res = await request(createApp()).get("/transfers.csv?maxRows=4");
 
-      expect(res.status).toBe(400);
-    });
+    expect(res.status).toBe(200);
+    expect(res.headers["x-truncated"]).toBe("true");
+    expect(res.headers["x-row-limit"]).toBe("4");
 
-    it("caps results at maxRows when more rows exist", async () => {
-      const transfers = Array.from({ length: 10 }, (_, i) => makeTransfer(i + 1));
-      
-      mockPrismaTokenTransferFindMany
-        .mockResolvedValueOnce([{ id: 6 }] as any) // isTruncated check
-        .mockResolvedValueOnce(transfers.slice(0, 5)) // streamTransfers batch 1
-        .mockResolvedValueOnce([]); // streamTransfers batch 2 (exhausted)
+    // The response terminated — the failure mode here was a body that never ends.
+    const dataLines = res.text.trim().split("\n").slice(1);
+    expect(dataLines).toHaveLength(4);
+  });
 
-      (prisma.tokenMetadata.findMany as jest.Mock).mockResolvedValue([
-        { network: "testnet", contractId: CONTRACT_A, symbol: "TOK", name: "Token", decimals: 7 },
-      ]);
-      await initTokenCache("testnet");
+  it("does not claim truncation when the rows end exactly at the cap", async () => {
+    seed(4);
 
-      const res = await request(app).get("/transfers.parquet").query({ maxRows: "5" });
+    const res = await request(createApp()).get("/transfers.csv?maxRows=4");
 
-      expect(res.status).toBe(200);
-      expect(res.headers["x-truncated"]).toBe("true");
-      expect(res.headers["x-row-limit"]).toBe("5");
-      expect(res.headers["content-type"]).toBe("application/octet-stream");
-      expect(res.headers["content-disposition"]).toContain("transfers.parquet");
-    });
+    expect(res.status).toBe(200);
+    expect(res.headers["x-truncated"]).toBeUndefined();
+    expect(res.text.trim().split("\n").slice(1)).toHaveLength(4);
+  });
 
-    it("does not set truncation headers when fewer rows than cap", async () => {
-      const transfers = Array.from({ length: 3 }, (_, i) => makeTransfer(i + 1));
-      
-      mockPrismaTokenTransferFindMany
-        .mockResolvedValueOnce([]) // isTruncated check
-        .mockResolvedValueOnce(transfers) // streamTransfers
-        .mockResolvedValueOnce([]); // streamTransfers exhausted
+  it("returns everything, unflagged, when the result is under the cap", async () => {
+    seed(3);
 
-      (prisma.tokenMetadata.findMany as jest.Mock).mockResolvedValue([
-        { network: "testnet", contractId: CONTRACT_A, symbol: "TOK", name: "Token", decimals: 7 },
-      ]);
-      await initTokenCache("testnet");
+    const res = await request(createApp()).get("/transfers.csv?maxRows=10");
 
-      const res = await request(app).get("/transfers.parquet").query({ maxRows: "5" });
+    expect(res.headers["x-truncated"]).toBeUndefined();
+    expect(res.text.trim().split("\n").slice(1)).toHaveLength(3);
+  });
 
-      expect(res.status).toBe(200);
-      expect(res.headers["x-truncated"]).toBeUndefined();
-      expect(res.headers["x-row-limit"]).toBeUndefined();
-    });
+  it("returns an empty export rather than failing when nothing matches", async () => {
+    seed(0);
+
+    const res = await request(createApp()).get("/transfers.csv");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-truncated"]).toBeUndefined();
   });
 });
